@@ -1,5 +1,6 @@
 import sys
 import os
+from core.highlighter import highlight_content
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException
@@ -80,7 +81,6 @@ async def scan_content(request: ContentRequest):
             rule_violations,
             rag_results
         )
-
         # 5단계: DB 저장
         review_id = db.save_review(
             content=content,
@@ -93,10 +93,18 @@ async def scan_content(request: ContentRequest):
             pii_detected=anon_result.detected_pii
         )
 
+        # 6단계: 하이라이팅 생성  ← 이 줄 추가
+        highlighted_html = highlight_content(
+            content,
+            analysis.violations,
+            rule_violations
+        )
+
         return {
             "review_id": review_id,
             "overall_risk": analysis.overall_risk,
             "approved": analysis.approved,
+            "highlighted_content": highlighted_html,
             "rule_violations": [
                 {
                     "rule_id": v.rule_id,
