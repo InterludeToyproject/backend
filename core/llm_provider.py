@@ -1,18 +1,23 @@
 import os
+import json
 import anthropic
 from dotenv import load_dotenv
 from typing import List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 load_dotenv()
 
 @dataclass
 class AnalysisResult:
-    overall_risk: str          # HIGH / MEDIUM / LOW / SAFE
-    violations: List[dict]     # 위반 항목 목록
-    suggestions: List[str]     # 수정 제안
-    summary: str               # 전체 요약
-    approved: bool             # 승인 가능 여부
+    overall_risk: str
+    violations: List[dict]
+    suggestions: List[str]
+    summary: str
+    approved: bool
+    confidence: float = 0.0        # 신뢰도 점수
+    verified: bool = False         # 검증 통과 여부
+    retry_count: int = 0           # 재시도 횟수
+    verification_note: str = ""    # 검증 메모
 
 class ClaudeProvider:
     def __init__(self):
@@ -20,20 +25,22 @@ class ClaudeProvider:
             api_key=os.getenv("ANTHROPIC_API_KEY")
         )
         self.model = "claude-sonnet-4-5"
+        self.max_retries = 2       # 최대 재시도 횟수
 
-    def analyze_content(
-        self,
-        content: str,
-        rule_violations: List,
-        rag_references: List[dict]
-    ) -> AnalysisResult:
+    def _parse_json(self, raw: str) -> dict:
+        """JSON 파싱 헬퍼"""
+        if "```json" in raw:
+            raw = raw.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw:
+            raw = raw.split("```")[1].split("```")[0].strip()
+        return json.loads(raw)
 
-        # RAG 참조 조문 정리
+    def _judge(self, content: str, rule_violations: List, rag_references: List[dict]) -> dict:
+        """1차 판단"""
         rag_context = ""
         for ref in rag_references[:3]:
             rag_context += f"\n---\n{ref['law_name']}\n{ref['content'][:300]}"
 
-        # Rule Engine 결과 정리
         rule_context = ""
         for v in rule_violations:
             rule_context += f"\n- [{v.severity}] {v.rule_name}: {v.flagged_text[:50]}..."
@@ -50,7 +57,7 @@ class ClaudeProvider:
 [관련 규제 조문]
 {rag_context if rag_context else "참조 조문 없음"}
 
-다음 JSON 형식으로만 응답하세요. 다른 텍스트는 절대 포함하지 마세요:
+다음 JSON 형식으로만 응답하세요:
 {{
     "overall_risk": "HIGH 또는 MEDIUM 또는 LOW 또는 SAFE",
     "violations": [
@@ -61,10 +68,7 @@ class ClaudeProvider:
             "severity": "HIGH 또는 MEDIUM 또는 LOW"
         }}
     ],
-    "suggestions": [
-        "수정 제안 1",
-        "수정 제안 2"
-    ],
+    "suggestions": ["수정 제안 1", "수정 제안 2"],
     "summary": "전체 심의 결과 요약 (2-3문장)",
     "approved": false
 }}"""
@@ -74,61 +78,96 @@ class ClaudeProvider:
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}]
         )
+        return self._parse_json(response.content[0].text.strip())
 
-        import json
-        raw = response.content[0].text.strip()
+    def _verify(self, content: str, judgment: dict, rag_references: List[dict]) -> dict:
+        """2차 자가 검증"""
+        rag_context = ""
+        for ref in rag_references[:3]:
+            rag_context += f"\n---\n{ref['law_name']}\n{ref['content'][:300]}"
 
-        # JSON 파싱
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0].strip()
+        violations_str = json.dumps(judgment.get("violations", []), ensure_ascii=False)
 
-        result = json.loads(raw)
+        prompt = f"""당신은 준법심의 검증 AI입니다.
+아래 1차 판단 결과가 규제 조문과 일치하는지 검증하세요.
+
+[원본 콘텐츠]
+{content}
+
+[1차 판단 결과]
+위험도: {judgment.get('overall_risk')}
+위반항목: {violations_str}
+
+[참조 규제 조문]
+{rag_context if rag_context else "참조 조문 없음"}
+
+다음 JSON 형식으로만 응답하세요:
+{{
+    "verified": true 또는 false,
+    "confidence": 0.0~1.0 사이 숫자 (판단 신뢰도),
+    "issues": ["검증 실패 이유 (있을 경우)"],
+    "correction_needed": true 또는 false,
+    "corrected_risk": "수정된 위험도 (correction_needed가 true일 때만)",
+    "note": "검증 결과 한줄 요약"
+}}"""
+
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return self._parse_json(response.content[0].text.strip())
+
+    def analyze_content(
+        self,
+        content: str,
+        rule_violations: List,
+        rag_references: List[dict]
+    ) -> AnalysisResult:
+
+        retry_count = 0
+        final_judgment = None
+        final_verification = None
+
+        for attempt in range(self.max_retries + 1):
+            # 1차 판단
+            judgment = self._judge(content, rule_violations, rag_references)
+
+            # 2차 검증
+            verification = self._verify(content, judgment, rag_references)
+
+            confidence = verification.get("confidence", 0.5)
+            verified = verification.get("verified", False)
+            correction_needed = verification.get("correction_needed", False)
+
+            # 검증 통과 or 마지막 시도
+            if verified and not correction_needed:
+                final_judgment = judgment
+                final_verification = verification
+                break
+
+            # 수정 필요한 경우 위험도 교정
+            if correction_needed:
+                corrected_risk = verification.get("corrected_risk")
+                if corrected_risk:
+                    judgment["overall_risk"] = corrected_risk
+
+            retry_count = attempt
+            final_judgment = judgment
+            final_verification = verification
+
+            # 신뢰도 높으면 재시도 불필요
+            if confidence >= 0.85:
+                break
 
         return AnalysisResult(
-            overall_risk=result.get("overall_risk", "MEDIUM"),
-            violations=result.get("violations", []),
-            suggestions=result.get("suggestions", []),
-            summary=result.get("summary", ""),
-            approved=result.get("approved", False)
+            overall_risk=final_judgment.get("overall_risk", "MEDIUM"),
+            violations=final_judgment.get("violations", []),
+            suggestions=final_judgment.get("suggestions", []),
+            summary=final_judgment.get("summary", ""),
+            approved=final_judgment.get("approved", False),
+            confidence=final_verification.get("confidence", 0.0),
+            verified=final_verification.get("verified", False),
+            retry_count=retry_count,
+            verification_note=final_verification.get("note", "")
         )
-
-
-if __name__ == "__main__":
-    import sys
-    sys.path.append("backend")
-    from core.rule_engine import RuleEngine
-    from core.rag import search_regulations
-
-    test_content = """
-    이 상품은 원금 보장되는 고수익 투자 상품입니다.
-    업계 최고의 수익률을 자랑하며, 손실 위험이 전혀 없습니다.
-    지금만 가입 가능한 한정 특가 상품이니 지금 바로 신청하세요.
-    """
-
-    print("=== Claude 판단 엔진 테스트 ===")
-
-    # 1차 Rule Engine
-    engine = RuleEngine()
-    rule_violations = engine.analyze(test_content)
-    print(f"Rule Engine: {len(rule_violations)}건 탐지")
-
-    # 2차 RAG 검색
-    rag_results = search_regulations("원금보장 금융상품 광고 금지", k=3)
-    print(f"RAG 검색: {len(rag_results)}건 참조")
-
-    # 3차 Claude 최종 판단
-    claude = ClaudeProvider()
-    result = claude.analyze_content(test_content, rule_violations, rag_results)
-
-    print(f"\n🎯 최종 위험도: {result.overall_risk}")
-    print(f"✅ 승인 가능: {result.approved}")
-    print(f"\n📋 위반 항목:")
-    for v in result.violations:
-        print(f"  [{v['severity']}] {v['type']}")
-        print(f"  근거: {v['law_reference']}")
-    print(f"\n💡 수정 제안:")
-    for s in result.suggestions:
-        print(f"  - {s}")
-    print(f"\n📝 요약: {result.summary}")

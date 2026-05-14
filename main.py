@@ -1,5 +1,7 @@
 import sys
 import os
+from core.crawler import RegulationCrawler
+crawler = RegulationCrawler()
 from core.highlighter import highlight_content
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -104,6 +106,9 @@ async def scan_content(request: ContentRequest):
             "review_id": review_id,
             "overall_risk": analysis.overall_risk,
             "approved": analysis.approved,
+            "confidence": analysis.confidence,        
+            "verified": analysis.verified,            
+            "retry_count": analysis.retry_count,  
             "highlighted_content": highlighted_html,
             "rule_violations": [
                 {
@@ -285,5 +290,25 @@ async def retroactive_scan(request: dict):
             "flagged_reviews": flagged
         }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/crawl-regulations")
+async def crawl_regulations():
+    """규제 공시 실시간 크롤링"""
+    try:
+        items = crawler.crawl_all()
+        analyzed = crawler.analyze_relevance(items)
+        
+        high_count = sum(1 for i in analyzed if i.get("relevance") == "HIGH")
+        medium_count = sum(1 for i in analyzed if i.get("relevance") == "MEDIUM")
+
+        return {
+            "total": len(analyzed),
+            "high_relevance": high_count,
+            "medium_relevance": medium_count,
+            "crawled_at": datetime.now().isoformat(),
+            "items": analyzed
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
