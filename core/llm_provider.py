@@ -3,7 +3,7 @@ import json
 import anthropic
 from dotenv import load_dotenv
 from typing import List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 load_dotenv()
 
@@ -14,10 +14,11 @@ class AnalysisResult:
     suggestions: List[str]
     summary: str
     approved: bool
-    confidence: float = 0.0        # 신뢰도 점수
-    verified: bool = False         # 검증 통과 여부
-    retry_count: int = 0           # 재시도 횟수
-    verification_note: str = ""    # 검증 메모
+    confidence: float = 0.0
+    verified: bool = False
+    retry_count: int = 0
+    verification_note: str = ""
+    translated_summary: str = ""
 
 class ClaudeProvider:
     def __init__(self):
@@ -25,18 +26,27 @@ class ClaudeProvider:
             api_key=os.getenv("ANTHROPIC_API_KEY")
         )
         self.model = "claude-sonnet-4-5"
-        self.max_retries = 2       # 최대 재시도 횟수
+        self.max_retries = 2
 
     def _parse_json(self, raw: str) -> dict:
-        """JSON 파싱 헬퍼"""
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
         elif "```" in raw:
             raw = raw.split("```")[1].split("```")[0].strip()
         return json.loads(raw)
 
-    def _judge(self, content: str, rule_violations: List, rag_references: List[dict]) -> dict:
-        """1차 판단"""
+    def _judge(self, content: str, rule_violations: List,
+               rag_references: List[dict], language: str = "ko") -> dict:
+        lang_instruction = ""
+        if language != "ko":
+            lang_instruction = """
+[언어 처리 안내]
+입력된 콘텐츠는 한국어가 아닙니다.
+1. 먼저 한국어로 번역하여 의미를 파악하세요
+2. 번역된 내용을 기준으로 한국 금융규제 위반 여부를 판단하세요
+3. flagged_text는 원문 표현을 그대로 사용하세요
+"""
+
         rag_context = ""
         for ref in rag_references[:3]:
             rag_context += f"\n---\n{ref['law_name']}\n{ref['content'][:300]}"
@@ -47,6 +57,7 @@ class ClaudeProvider:
 
         prompt = f"""당신은 JB금융그룹의 준법심의 AI입니다.
 아래 금융 마케팅 콘텐츠를 분석하여 준법 위반 여부를 판단해주세요.
+{lang_instruction}
 
 [심의 대상 콘텐츠]
 {content}
@@ -59,11 +70,13 @@ class ClaudeProvider:
 
 다음 JSON 형식으로만 응답하세요:
 {{
+    "detected_language": "{language}",
+    "translated_summary": "콘텐츠 한국어 요약 (한국어가 아닌 경우만, 한국어면 빈 문자열)",
     "overall_risk": "HIGH 또는 MEDIUM 또는 LOW 또는 SAFE",
     "violations": [
         {{
             "type": "위반 유형",
-            "flagged_text": "문제 문구",
+            "flagged_text": "문제 문구 (원문 그대로)",
             "law_reference": "근거 조문",
             "severity": "HIGH 또는 MEDIUM 또는 LOW"
         }}
@@ -81,7 +94,6 @@ class ClaudeProvider:
         return self._parse_json(response.content[0].text.strip())
 
     def _verify(self, content: str, judgment: dict, rag_references: List[dict]) -> dict:
-        """2차 자가 검증"""
         rag_context = ""
         for ref in rag_references[:3]:
             rag_context += f"\n---\n{ref['law_name']}\n{ref['content'][:300]}"
@@ -103,11 +115,11 @@ class ClaudeProvider:
 
 다음 JSON 형식으로만 응답하세요:
 {{
-    "verified": true 또는 false,
-    "confidence": 0.0~1.0 사이 숫자 (판단 신뢰도),
-    "issues": ["검증 실패 이유 (있을 경우)"],
-    "correction_needed": true 또는 false,
-    "corrected_risk": "수정된 위험도 (correction_needed가 true일 때만)",
+    "verified": true,
+    "confidence": 0.0,
+    "issues": [],
+    "correction_needed": false,
+    "corrected_risk": "",
     "note": "검증 결과 한줄 요약"
 }}"""
 
@@ -122,7 +134,8 @@ class ClaudeProvider:
         self,
         content: str,
         rule_violations: List,
-        rag_references: List[dict]
+        rag_references: List[dict],
+        language: str = "ko"
     ) -> AnalysisResult:
 
         retry_count = 0
@@ -130,23 +143,18 @@ class ClaudeProvider:
         final_verification = None
 
         for attempt in range(self.max_retries + 1):
-            # 1차 판단
-            judgment = self._judge(content, rule_violations, rag_references)
-
-            # 2차 검증
+            judgment = self._judge(content, rule_violations, rag_references, language)
             verification = self._verify(content, judgment, rag_references)
 
             confidence = verification.get("confidence", 0.5)
             verified = verification.get("verified", False)
             correction_needed = verification.get("correction_needed", False)
 
-            # 검증 통과 or 마지막 시도
             if verified and not correction_needed:
                 final_judgment = judgment
                 final_verification = verification
                 break
 
-            # 수정 필요한 경우 위험도 교정
             if correction_needed:
                 corrected_risk = verification.get("corrected_risk")
                 if corrected_risk:
@@ -156,7 +164,6 @@ class ClaudeProvider:
             final_judgment = judgment
             final_verification = verification
 
-            # 신뢰도 높으면 재시도 불필요
             if confidence >= 0.85:
                 break
 
@@ -169,5 +176,6 @@ class ClaudeProvider:
             confidence=final_verification.get("confidence", 0.0),
             verified=final_verification.get("verified", False),
             retry_count=retry_count,
-            verification_note=final_verification.get("note", "")
+            verification_note=final_verification.get("note", ""),
+            translated_summary=final_judgment.get("translated_summary", "")
         )

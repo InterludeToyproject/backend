@@ -4,6 +4,7 @@ from core.crawler import RegulationCrawler
 crawler = RegulationCrawler()
 from core.highlighter import highlight_content
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from core.language_detector import detect_language, LANGUAGE_NAMES, LANGUAGE_FLAGS
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,6 +70,9 @@ async def scan_content(request: ContentRequest):
         # 1단계: 익명화
         anon_result = anonymizer.anonymize(content)
         safe_content = anon_result.anonymized_text
+        
+        # 1.5단계: 언어 감지  ← 추가
+        detected_lang = detect_language(content)
 
         # 2단계: Rule Engine 1차 필터
         rule_violations = rule_engine.analyze(content)
@@ -81,7 +85,8 @@ async def scan_content(request: ContentRequest):
         analysis = claude.analyze_content(
             safe_content,
             rule_violations,
-            rag_results
+            rag_results,
+            language=detected_lang
         )
         # 5단계: DB 저장
         review_id = db.save_review(
@@ -104,6 +109,9 @@ async def scan_content(request: ContentRequest):
 
         return {
             "review_id": review_id,
+            "detected_language": detected_lang,                   
+            "language_name": LANGUAGE_NAMES.get(detected_lang, "기타"),  #
+            "language_flag": LANGUAGE_FLAGS.get(detected_lang, "🌐"), 
             "overall_risk": analysis.overall_risk,
             "approved": analysis.approved,
             "confidence": analysis.confidence,        
