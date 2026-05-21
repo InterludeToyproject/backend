@@ -10,6 +10,7 @@ from typing import Optional
 import json
 import traceback
 from datetime import datetime
+from core.hallucination_detector import verify_violations, get_hallucination_summary
 
 from core.rule_engine import RuleEngine
 from core.llm_provider import ClaudeProvider
@@ -156,6 +157,10 @@ async def scan_content(request: ContentRequest):
             rule_violations
         )
         
+        # 환각 탐지 — 조문 검증
+        verified_violations = verify_violations(analysis.violations)
+        hallucination_summary = get_hallucination_summary(verified_violations)
+        
         # 과태료 계산
         penalty = calculate_penalty(analysis.violations, analysis.overall_risk)
 
@@ -172,6 +177,8 @@ async def scan_content(request: ContentRequest):
             "retry_count": analysis.retry_count,  
             "penalty": penalty,
             "highlighted_content": highlighted_html,
+            "ai_violations": verified_violations,      
+            "hallucination_summary": hallucination_summary,
             "rule_violations": [
                 {
                     "rule_id": v.rule_id,
