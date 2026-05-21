@@ -1,3 +1,4 @@
+from core.penalty_calculator import calculate_penalty
 import sys
 import os
 from core.crawler import RegulationCrawler
@@ -106,6 +107,9 @@ async def scan_content(request: ContentRequest):
             analysis.violations,
             rule_violations
         )
+        
+        # 과태료 계산
+        penalty = calculate_penalty(analysis.violations, analysis.overall_risk)
 
         return {
             "review_id": review_id,
@@ -117,6 +121,7 @@ async def scan_content(request: ContentRequest):
             "confidence": analysis.confidence,        
             "verified": analysis.verified,            
             "retry_count": analysis.retry_count,  
+            "penalty": penalty,
             "highlighted_content": highlighted_html,
             "rule_violations": [
                 {
