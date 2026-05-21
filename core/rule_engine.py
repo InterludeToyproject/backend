@@ -6,7 +6,7 @@ from typing import List
 class RuleViolation:
     rule_id: str
     rule_name: str
-    severity: str  # HIGH / MEDIUM / LOW
+    severity: str
     flagged_text: str
     description: str
     law_reference: str
@@ -14,10 +14,28 @@ class RuleViolation:
 class RuleEngine:
     def __init__(self):
         self.rules = self._load_rules()
+        self._load_dynamic_rules()
+
+    def _load_dynamic_rules(self):
+        """DB에서 동적 규칙 로드"""
+        try:
+            from core.rule_extractor import RuleExtractor
+            extractor = RuleExtractor()
+            dynamic = extractor.get_dynamic_rules()
+            for rule in dynamic:
+                self.rules.append({
+                    "id": rule["id"],
+                    "name": rule["name"],
+                    "severity": rule["severity"],
+                    "patterns": rule["patterns"],
+                    "description": rule["description"],
+                    "law_reference": rule["law_reference"]
+                })
+        except Exception as e:
+            print(f"동적 규칙 로드 실패: {e}")
 
     def _load_rules(self):
         return [
-
             # ==========================================
             # HIGH - 즉시 수정 필요
             # ==========================================
@@ -74,7 +92,106 @@ class RuleEngine:
                 "description": "투자 상품의 손실 위험성 미고지",
                 "law_reference": "금융소비자보호법 제19조 (설명의무)"
             },
-
+            {
+                "id": "R011",
+                "name": "수익률 과거 실적 미고지",
+                "severity": "HIGH",
+                "patterns": [
+                    r"연\s*\d+%\s*수익",
+                    r"\d+%\s*수익률\s*보장",
+                    r"작년에\s*\d+%",
+                ],
+                "description": "과거 수익률 제시 시 미래 수익 미보장 문구 누락",
+                "law_reference": "금융소비자보호법 제17조 (광고 필수 고지사항)"
+            },
+            {
+                "id": "R012",
+                "name": "투자 원금 손실 위험 미고지",
+                "severity": "HIGH",
+                "patterns": [
+                    r"절대\s*손실\s*없",
+                    r"무조건\s*이익",
+                    r"반드시\s*수익",
+                ],
+                "description": "투자성 상품 광고 시 원금 손실 가능성 미고지",
+                "law_reference": "금융소비자보호법 제19조 (설명의무)"
+            },
+            {
+                "id": "R014",
+                "name": "약관 불공정 조항 표현",
+                "severity": "HIGH",
+                "patterns": [
+                    r"일방적으로\s*변경",
+                    r"고객\s*동의\s*없이\s*수정",
+                    r"회사\s*재량으로\s*변경",
+                ],
+                "description": "약관의 일방적 변경 가능성을 시사하는 불공정 조항",
+                "law_reference": "금융소비자보호법 제14조 (약관 규제)"
+            },
+            {
+                "id": "R015",
+                "name": "대출 금리 과장",
+                "severity": "HIGH",
+                "patterns": [
+                    r"초저금리",
+                    r"업계\s*최저\s*금리",
+                    r"금리\s*0%",
+                    r"무이자\s*대출",
+                ],
+                "description": "대출 금리 과장 광고 또는 근거 없는 최저 금리 표현",
+                "law_reference": "대부업법 제9조 (광고 규제)"
+            },
+            {
+                "id": "R016",
+                "name": "보험 보장 범위 과장",
+                "severity": "HIGH",
+                "patterns": [
+                    r"모든\s*질병\s*보장",
+                    r"100%\s*보장",
+                    r"완벽한\s*보장",
+                    r"전액\s*보상",
+                ],
+                "description": "보험 보장 범위 과장 표현",
+                "law_reference": "보험업법 제95조 (보험광고 규제)"
+            },
+            {
+                "id": "R017",
+                "name": "개인정보 제3자 제공 미고지",
+                "severity": "HIGH",
+                "patterns": [
+                    r"제휴사에\s*제공",
+                    r"파트너사\s*공유",
+                    r"협력업체.*전달",
+                ],
+                "description": "개인정보 제3자 제공 시 동의 절차 미고지",
+                "law_reference": "개인정보보호법 제17조 (개인정보 제3자 제공)"
+            },
+            {
+                "id": "R019",
+                "name": "취약계층 대상 과장",
+                "severity": "HIGH",
+                "patterns": [
+                    r"어린이.*투자",
+                    r"노후\s*보장\s*완벽",
+                    r"은퇴\s*후\s*걱정\s*없",
+                    r"어르신.*무조건",
+                ],
+                "description": "취약계층 대상 과장·허위 광고",
+                "law_reference": "금융소비자보호법 제21조 (불공정 영업행위)"
+            },
+            {
+                "id": "R020",
+                "name": "손실보전 약정 표현",
+                "severity": "HIGH",
+                "patterns": [
+                    r"손실.*보전",
+                    r"손실.*메워",
+                    r"손실.*보상해",
+                    r"마이너스.*보장",
+                ],
+                "description": "손실보전 약정 또는 이익보장 약정 표현",
+                "law_reference": "자본시장법 제55조 (손실보전 등의 금지)"
+            },
             # ==========================================
             # MEDIUM - 검토 필요
             # ==========================================
@@ -129,7 +246,32 @@ class RuleEngine:
                 "description": "소비자 판단을 저해하는 긴급성·희소성 과장 표현",
                 "law_reference": "금융소비자보호법 제21조 (불공정 영업행위 금지)"
             },
-
+            {
+                "id": "R013",
+                "name": "SNS 해시태그 과장 광고",
+                "severity": "MEDIUM",
+                "patterns": [
+                    r"#수익인증",
+                    r"#재테크성공",
+                    r"#월\d+만",
+                    r"#무조건수익",
+                ],
+                "description": "SNS 해시태그를 통한 과장 광고 표현",
+                "law_reference": "금융소비자보호법 제22조 (부당권유 금지)"
+            },
+            {
+                "id": "R018",
+                "name": "AI 생성 콘텐츠 미표시",
+                "severity": "MEDIUM",
+                "patterns": [
+                    r"AI\s*작성",
+                    r"인공지능\s*생성",
+                    r"ChatGPT",
+                    r"자동\s*생성된",
+                ],
+                "description": "AI 생성 콘텐츠임을 명시하지 않고 배포하는 경우",
+                "law_reference": "금융소비자보호법 제17조 (광고 표시 의무)"
+            },
             # ==========================================
             # LOW - 모니터링
             # ==========================================
@@ -163,55 +305,29 @@ class RuleEngine:
     def analyze(self, content: str) -> List[RuleViolation]:
         """콘텐츠 분석 후 위반 목록 반환"""
         violations = []
-
         for rule in self.rules:
             for pattern in rule["patterns"]:
-                matches = re.finditer(pattern, content)
-                for match in matches:
-                    # 앞뒤 30자 컨텍스트 추출
-                    start = max(0, match.start() - 30)
-                    end = min(len(content), match.end() + 30)
-                    context = content[start:end]
-
-                    violations.append(RuleViolation(
-                        rule_id=rule["id"],
-                        rule_name=rule["name"],
-                        severity=rule["severity"],
-                        flagged_text=context,
-                        description=rule["description"],
-                        law_reference=rule["law_reference"]
-                    ))
-                    break  # 같은 규칙 중복 방지
-
+                try:
+                    matches = re.finditer(pattern, content)
+                    for match in matches:
+                        start = max(0, match.start() - 30)
+                        end = min(len(content), match.end() + 30)
+                        context = content[start:end]
+                        violations.append(RuleViolation(
+                            rule_id=rule["id"],
+                            rule_name=rule["name"],
+                            severity=rule["severity"],
+                            flagged_text=context,
+                            description=rule["description"],
+                            law_reference=rule["law_reference"]
+                        ))
+                        break
+                except:
+                    continue
         return violations
 
     def get_severity_summary(self, violations: List[RuleViolation]) -> dict:
-        """위반 심각도 요약"""
         summary = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
         for v in violations:
             summary[v.severity] += 1
         return summary
-
-
-if __name__ == "__main__":
-    # 테스트
-    engine = RuleEngine()
-
-    test_content = """
-    이 상품은 원금 보장되는 고수익 투자 상품입니다.
-    업계 최고의 수익률을 자랑하며, 손실 위험이 전혀 없습니다.
-    지금만 가입 가능한 한정 특가 상품이니 지금 바로 신청하세요.
-    고객님의 모든 거래내역을 활용하여 맞춤 서비스를 제공합니다.
-    """
-
-    print("=== Rule Engine 테스트 ===")
-    violations = engine.analyze(test_content)
-
-    for v in violations:
-        print(f"\n[{v.severity}] {v.rule_name}")
-        print(f"  탐지 문구: ...{v.flagged_text}...")
-        print(f"  설명: {v.description}")
-        print(f"  근거: {v.law_reference}")
-
-    summary = engine.get_severity_summary(violations)
-    print(f"\n📊 요약: HIGH {summary['HIGH']}건 | MEDIUM {summary['MEDIUM']}건 | LOW {summary['LOW']}건")

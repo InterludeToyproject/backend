@@ -1,26 +1,41 @@
-from core.penalty_calculator import calculate_penalty
 import sys
 import os
-from core.crawler import RegulationCrawler
-crawler = RegulationCrawler()
-from core.highlighter import highlight_content
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from core.language_detector import detect_language, LANGUAGE_NAMES, LANGUAGE_FLAGS
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
+import traceback
 from datetime import datetime
 
 from core.rule_engine import RuleEngine
 from core.llm_provider import ClaudeProvider
 from core.anonymizer import Anonymizer
 from core.rag import search_regulations
+from core.highlighter import highlight_content
+from core.language_detector import detect_language, LANGUAGE_NAMES, LANGUAGE_FLAGS
+from core.penalty_calculator import calculate_penalty
+from core.report_generator import ReportGenerator
+from core.crawler import RegulationCrawler
+from core.rule_extractor import RuleExtractor
+from core.injection_detector import InjectionDetector
 from db.database import Database
 
 app = FastAPI(title="RegRadar API", version="1.0.0")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    print("=== 에러 발생 ===")
+    traceback.print_exc()
+    print("=================")
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)}
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +49,10 @@ rule_engine = RuleEngine()
 claude = ClaudeProvider()
 anonymizer = Anonymizer()
 db = Database()
+injection_detector = InjectionDetector()
+report_generator = ReportGenerator()
+crawler = RegulationCrawler()
+rule_extractor = RuleExtractor()
 
 # ==========================================
 # 요청/응답 모델
@@ -67,6 +86,35 @@ async def scan_content(request: ContentRequest):
     """콘텐츠 준법 심의"""
     try:
         content = request.content
+
+        #0단계: 프롬프트 인젝션 탐지
+        injection_result = injection_detector.detect(content)
+        if injection_result.blocked:
+            return {
+                "review_id": None,
+                "overall_risk": "BLOCKED",
+                "approved": False,
+                "blocked": True,
+                "threat_level": injection_result.threat_level,
+                "block_reason": injection_result.reason,
+                "security_alert": True,
+                "highlighted_content": "",
+                "rule_violations": [],
+                "ai_violations": [],
+                "suggestions": ["보안 위협이 탐지되어 심의가 차단되었습니다."],
+                "summary": injection_result.reason,
+                "pii_detected": [],
+                "rag_references": [],
+                "penalty": {},
+                "confidence": 0,
+                "verified": False,
+                "retry_count": 0,
+                "verification_note": "",
+                "detected_language": "ko",
+                "language_name": "한국어",
+                "language_flag": "🇰🇷",
+                "translated_summary": ""
+            }
 
         # 1단계: 익명화
         anon_result = anonymizer.anonymize(content)
@@ -113,6 +161,7 @@ async def scan_content(request: ContentRequest):
 
         return {
             "review_id": review_id,
+            "content": content,
             "detected_language": detected_lang,                   
             "language_name": LANGUAGE_NAMES.get(detected_lang, "기타"),  #
             "language_flag": LANGUAGE_FLAGS.get(detected_lang, "🌐"), 
@@ -147,12 +196,17 @@ async def scan_content(request: ContentRequest):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_msg = traceback.format_exc()
+        print("######### 에러 #########")
+        print(error_msg)
+        print("########################")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.post("/approve")
 async def approve_content(request: ApprovalRequest):
-    """심의 결과 승인/반려"""
+    """심의 결과 승인/반려 + 레포트 자동 생성"""
     try:
         db.update_approval(
             review_id=request.review_id,
@@ -160,12 +214,38 @@ async def approve_content(request: ApprovalRequest):
             reviewer=request.reviewer,
             comment=request.comment
         )
+
+        # 전체 심의 데이터 조회
+        full_review = db.get_review(request.review_id)
+
+        review_data = {
+            "review_id": request.review_id,
+            "content_type": full_review.get("content_type", ""),
+            "author": full_review.get("author", ""),
+            "reviewer": request.reviewer,
+            "comment": request.comment,
+            "overall_risk": full_review.get("overall_risk", ""),
+            "confidence": full_review.get("confidence", 0),
+            "content": full_review.get("content", ""),
+            "summary": full_review.get("summary", ""),
+            "violations": full_review.get("violations", []),
+            "suggestions": full_review.get("suggestions", []),
+        }
+
+        # 레포트 생성
+        if request.action == "approve":
+            report = report_generator.generate_approval_report(review_data)
+        else:
+            report = report_generator.generate_rejection_report(review_data)
+
         return {
             "review_id": request.review_id,
             "action": request.action,
             "reviewer": request.reviewer,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "report": report
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -324,4 +404,84 @@ async def crawl_regulations():
             "items": analyzed
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/extract-rules")
+async def extract_rules():
+    """규제문서에서 규칙 자동 추출"""
+    try:
+        queries = [
+            "금융상품 광고 금지 표현",
+            "개인정보 수집 동의",
+            "투자 위험 고지 의무",
+            "불완전판매 금지",
+            "금융소비자 보호 의무"
+        ]
+
+        total_added = rule_extractor.extract_from_vectorstore(queries)
+        stats = rule_extractor.get_stats()
+
+        # Rule Engine 재로드
+        rule_engine.rules = rule_engine._load_rules()
+        rule_engine._load_dynamic_rules()
+
+        return {
+            "newly_added": total_added,
+            "total_rules": stats["total"] + 20,
+            "dynamic_rules": stats,
+            "message": f"규제문서 분석 완료. {total_added}개 규칙 자동 추출"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/rules/stats")
+async def get_rules_stats():
+    """현재 적용 중인 규칙 통계"""
+    dynamic_stats = rule_extractor.get_stats()
+    return {
+        "static_rules": 20,
+        "dynamic_rules": dynamic_stats["total"],
+        "total_rules": 20 + dynamic_stats["total"],
+        "by_severity": {
+            "HIGH": dynamic_stats["high"],
+            "MEDIUM": dynamic_stats["medium"],
+            "LOW": dynamic_stats["low"]
+        }
+    }
+    
+@app.get("/security/logs")
+async def get_security_logs():
+    """보안 이벤트 로그 조회"""
+    logs = injection_detector.get_security_logs()
+    stats = injection_detector.get_stats()
+    return {"logs": logs, "stats": stats}
+
+class CorrectionRequest(BaseModel):
+    review_id: int
+    content: str
+
+@app.post("/generate-correction")
+async def generate_correction(request: CorrectionRequest):
+    """수정본 생성 (버튼 클릭 시에만 호출)"""
+    try:
+        review = db.get_review(request.review_id)
+        if not review:
+            raise HTTPException(status_code=404, detail="심의 결과를 찾을 수 없습니다")
+
+        violations = review.get("violations", [])
+        suggestions = review.get("suggestions", [])
+
+        corrected = claude.generate_corrected_content(
+            request.content,
+            violations,
+            suggestions
+        )
+
+        return {
+            "review_id": request.review_id,
+            "corrected_content": corrected
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

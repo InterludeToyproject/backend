@@ -1,0 +1,23 @@
+INFO:     Will watch for changes in these directories: ['/Users/jeongseorin/Desktop/2026/26-1/regRadar/backend']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [51434] using WatchFiles
+INFO:     Started server process [51437]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+######### 에러 #########
+Traceback (most recent call last):
+  File "/Users/jeongseorin/Desktop/2026/26-1/regRadar/backend/main.py", line 87, in scan_content
+    injection_result = injection_detector.detect(content)
+                       ^^^^^^^^^^^^^^^^^^
+NameError: name 'injection_detector' is not defined
+
+########################
+INFO:     127.0.0.1:54781 - "POST /scan-content HTTP/1.1" 500 Internal Server Error
+WARNING:  WatchFiles detected changes in 'main.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [51437]
+INFO:     Started server process [51445]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.

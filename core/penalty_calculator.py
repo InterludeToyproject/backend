@@ -65,10 +65,9 @@ RISK_LABELS = {
     "SAFE": {"label": "없음", "color": "✅", "reputation": "없음"}
 }
 
+from core.sanction_crawler import SanctionCrawler
+
 def calculate_penalty(violations: List[dict], overall_risk: str) -> dict:
-    """
-    위반 항목 기반 예상 과태료 계산
-    """
     if not violations or overall_risk == "SAFE":
         return {
             "total_fine_min": 0,
@@ -84,7 +83,6 @@ def calculate_penalty(violations: List[dict], overall_risk: str) -> dict:
     total_min = 0
     total_max = 0
     all_sanctions = []
-    all_cases = []
 
     violation_types = [v.get("type", "") for v in violations]
 
@@ -97,21 +95,25 @@ def calculate_penalty(violations: List[dict], overall_risk: str) -> dict:
                     total_min += rule["fine_min"]
                     total_max += rule["fine_max"]
                     all_sanctions.append(rule["sanction"])
-                    all_cases.extend(rule["cases"][:1])
                 break
 
-    # 위험도에 따라 가중치
     multiplier = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}.get(overall_risk, 0.5)
     estimated_fine = int((total_min + total_max) / 2 * multiplier)
-
     risk_info = RISK_LABELS.get(overall_risk, RISK_LABELS["MEDIUM"])
+
+    # 실제 금감원 제재 사례 크롤링
+    try:
+        crawler = SanctionCrawler()
+        real_cases = crawler.find_relevant_sanctions(violation_types)
+    except:
+        real_cases = []
 
     return {
         "total_fine_min": total_min,
         "total_fine_max": total_max,
         "estimated_fine": estimated_fine,
         "sanctions": list(set(all_sanctions)),
-        "cases": all_cases,
+        "cases": real_cases,
         "risk_level": risk_info["label"],
         "risk_color": risk_info["color"],
         "reputation_risk": risk_info["reputation"],
